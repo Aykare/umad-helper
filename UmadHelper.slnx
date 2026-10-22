@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="UmadHelper/UmadHelper.csproj">
+    <Platform Project="x64" />
+  </Project>
+</Solution>
