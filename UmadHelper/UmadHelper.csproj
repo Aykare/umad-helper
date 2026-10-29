@@ -23,6 +23,26 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </Content>
+    <Content Include="..\Data\spread_gray.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </Content>
+    <Content Include="..\Data\stack_gray.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </Content>
+    <Content Include="..\Data\cone_gray.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </Content>
+    <Content Include="..\Data\way_*.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </Content>
+    <Content Include="..\Data\*_Icon_11.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </Content>
     <Content Include="..\Data\alpha.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>

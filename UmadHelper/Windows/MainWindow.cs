@@ -2,13 +2,16 @@ using System;
 using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
+using Dalamud.Interface.Components;
 using Dalamud.Interface.Windowing;
 
 namespace SamplePlugin.Windows;
 
-public class MainWindow : Window, IDisposable
+public partial class MainWindow : Window, IDisposable
 {
-    private static readonly uint[] PreviewMarkers = [715, 716, 717];
+    private static readonly uint[] AlphaPreviewMarkers = [715, 717, 715, 716, 716, 716, 716, 716, 716];
+    private static readonly uint[] BetaPreviewMarkers = [716, 716, 716, 716, 717, 716, 715, 715, 715];
     private const string TowerSequence = "AAABBBBA";
     private const float TowerIconHeight = 30.0f;
     private const float GroupIconSize = 64.0f;
@@ -17,9 +20,9 @@ public class MainWindow : Window, IDisposable
     private readonly string markerImageDirectory;
     private readonly Plugin plugin;
     private bool previewActive;
-    private uint previewInitialMarker = PreviewMarkers[0];
-    private uint previewBuddyMarker = PreviewMarkers[1];
-    private uint previewCurrentMarker = PreviewMarkers[0];
+    private Mechanic previewMechanic;
+    private Vector2 headerButtonWidths = new(24.0f, 24.0f);
+    private bool previewIsAlpha = true;
     private int previewCompletedRounds;
     private string? previewResolve;
     private int previewActivePhase;
@@ -37,29 +40,43 @@ public class MainWindow : Window, IDisposable
         this.plugin = plugin;
     }
 
-    public void Dispose() { }
+    public void Dispose()
+    {
+        largeFont.Dispose();
+    }
 
     public override void Draw()
     {
+        DrawHeaderActions();
+
         if (previewActive)
         {
             DrawPreview();
             return;
         }
 
-        DrawBuddySelector();
-
         var tracker = plugin.P2ForsakenTracker;
         var localPlayer = Plugin.ObjectTable.LocalPlayer;
-        var buddy = Plugin.PartyList.FirstOrDefault(member =>
-            member.ContentId == plugin.Configuration.SelectedBuddyContentId);
+        var buddyResolution = RaidPositions.ResolveBuddy(plugin.Configuration);
+        var buddy = buddyResolution.Buddy;
 
-        if (!tracker.IsForsakenPhase)
+        if (plugin.LimitCutTracker.IsActive)
         {
-            ImGui.TextDisabled("Waiting for Forsaken.");
+            DrawLimitCutLive(plugin.LimitCutTracker);
+        }
+        else if (plugin.KefkaSaysTracker.IsActive)
+        {
+            DrawKefkaSaysLive(plugin.KefkaSaysTracker);
+        }
+        else if (!tracker.IsForsakenPhase)
+        {
+            ImGui.TextDisabled("No active mechanic.");
+        }
+        else if (buddy is null)
+        {
+            ImGui.TextDisabled(buddyResolution.Message);
         }
         else if (localPlayer is null
-                 || buddy is null
                  || !tracker.TryGetInitialMarker(localPlayer.EntityId, out var localMarker)
                  || !tracker.TryGetInitialMarker(buddy.EntityId, out var buddyMarker))
         {
@@ -74,12 +91,47 @@ public class MainWindow : Window, IDisposable
                 tracker.LastResolve,
                 tracker.ActivePhaseIndex);
         }
+    }
 
-        ImGui.Separator();
-        if (ImGui.Button("Preview"))
+    /// <summary>Switches the window to the simulated preview of a mechanic.</summary>
+    public void StartPreview(Mechanic mechanic)
+    {
+        previewActive = true;
+        previewMechanic = mechanic;
+        ResetPreview();
+    }
+
+    /// <summary>Right-aligns the History and Settings icon buttons in the window's top row.</summary>
+    private void DrawHeaderActions()
+    {
+        var spacing = ImGui.GetStyle().ItemSpacing.X;
+
+        // Icon button widths depend on the icon font, so reuse the widths measured on the previous frame.
+        var totalWidth = headerButtonWidths.X + headerButtonWidths.Y + spacing;
+        var rightEdge = ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X;
+        ImGui.SetCursorPosX(Math.Max(ImGui.GetCursorPosX(), rightEdge - totalWidth));
+
+        if (ImGuiComponents.IconButton("##OpenUmadHistory", FontAwesomeIcon.History))
         {
-            previewActive = true;
-            ResetPreview();
+            plugin.ToggleHistoryUi();
+        }
+
+        headerButtonWidths.X = ImGui.GetItemRectSize().X;
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Open history.");
+        }
+
+        ImGui.SameLine(0.0f, spacing);
+        if (ImGuiComponents.IconButton("##OpenUmadSettings", FontAwesomeIcon.Cog))
+        {
+            plugin.ToggleConfigUi();
+        }
+
+        headerButtonWidths.Y = ImGui.GetItemRectSize().X;
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Open Umad Helper settings.");
         }
     }
 
@@ -97,15 +149,16 @@ public class MainWindow : Window, IDisposable
             return;
         }
 
-        DrawTowerTimeline(rounds);
+        var takesTower = TakesTower(isAlpha, rounds);
+        DrawTowerTimeline(rounds, takesTower);
         DrawPhaseTimeline(activePhase, resolve);
 
         ImGui.Spacing();
-        DrawPersonalIcons(isAlpha, markerId);
+        DrawPersonalIcons(isAlpha, markerId, takesTower);
     }
 
     /// <summary>Shows all eight towers and highlights only the current tower.</summary>
-    private void DrawTowerTimeline(int completedRounds)
+    private void DrawTowerTimeline(int completedRounds, bool takesTower)
     {
         if (!ImGui.BeginTable("##ForsakenTowerTimeline", TowerSequence.Length,
                 ImGuiTableFlags.BordersInnerV | ImGuiTableFlags.BordersOuter | ImGuiTableFlags.SizingStretchSame))
@@ -120,9 +173,11 @@ public class MainWindow : Window, IDisposable
             var isActive = tower == completedRounds;
             ImGui.TableSetBgColor(
                 ImGuiTableBgTarget.CellBg,
-                ImGui.GetColorU32(isActive
-                    ? new Vector4(0.16f, 0.42f, 0.30f, 1.0f)
-                    : new Vector4(0.12f, 0.13f, 0.16f, 1.0f)));
+                ImGui.GetColorU32(!isActive
+                    ? new Vector4(0.12f, 0.13f, 0.16f, 1.0f)
+                    : takesTower
+                        ? new Vector4(0.16f, 0.42f, 0.30f, 1.0f)
+                        : new Vector4(0.45f, 0.17f, 0.17f, 1.0f)));
 
             var icon = TowerSequence[tower] == 'A' ? "alpha.png" : "beta.png";
             DrawCenteredIcon(icon, TowerIconHeight);
@@ -166,7 +221,7 @@ public class MainWindow : Window, IDisposable
     }
 
     /// <summary>Places the local Alpha/Beta icon and current marker image side by side.</summary>
-    private void DrawPersonalIcons(bool isAlpha, uint? markerId)
+    private void DrawPersonalIcons(bool isAlpha, uint? markerId, bool takesTower)
     {
         if (!ImGui.BeginTable("##ForsakenPersonalIcons", 2, ImGuiTableFlags.SizingStretchSame))
         {
@@ -177,37 +232,61 @@ public class MainWindow : Window, IDisposable
         ImGui.TableSetColumnIndex(0);
         DrawCenteredIcon(isAlpha ? "alpha.png" : "beta.png", GroupIconSize);
         ImGui.TableSetColumnIndex(1);
-        if (markerId is uint currentMarker && MarkerImageName(currentMarker) is string imageName)
+        if (markerId is uint currentMarker && MarkerImageName(currentMarker, takesTower) is string imageName)
         {
-            DrawCenteredIcon(imageName, MarkerIconSize);
+            // Stack has no gray asset; it can linger after a group's last tower, so dim it instead.
+            var tint = !takesTower && currentMarker == 715
+                ? new Vector4(0.4f, 0.4f, 0.4f, 0.8f)
+                : Vector4.One;
+            DrawCenteredIcon(imageName, MarkerIconSize, tint);
         }
 
         ImGui.EndTable();
     }
 
     /// <summary>Draws an image centered in the current table cell.</summary>
-    private void DrawCenteredIcon(string imageName, float size)
+    private void DrawCenteredIcon(string imageName, float size, Vector4? tint = null)
     {
         var width = IconWidth(imageName, size);
         ImGui.SetCursorPosX(ImGui.GetCursorPosX() + Math.Max(0.0f, (ImGui.GetColumnWidth() - width) * 0.5f));
-        DrawIcon(imageName, size);
+        DrawIcon(imageName, size, tint ?? Vector4.One);
     }
 
-    /// <summary>Draws the selectable initial markers and the compact simulated status.</summary>
+    /// <summary>Draws the preview of whichever mechanic was chosen.</summary>
     private void DrawPreview()
+    {
+        if (previewMechanic == Mechanic.LimitCut)
+        {
+            DrawLimitCutPreview();
+            return;
+        }
+
+        if (previewMechanic == Mechanic.KefkaSays)
+        {
+            DrawKefkaSaysPreview();
+            return;
+        }
+
+        DrawForsakenPreview();
+    }
+
+    /// <summary>Draws the scripted example run and its simulated controls.</summary>
+    private void DrawForsakenPreview()
     {
         ImGui.Text("Preview");
         if (previewCompletedRounds == 0)
         {
-            DrawPreviewMarkerSelector("You", "PreviewYou", ref previewInitialMarker);
             ImGui.SameLine();
-            DrawPreviewMarkerSelector("Buddy", "PreviewBuddy", ref previewBuddyMarker);
-            previewCurrentMarker = previewInitialMarker;
+            if (ImGui.Button(previewIsAlpha ? "Example: Alpha" : "Example: Beta"))
+            {
+                previewIsAlpha = !previewIsAlpha;
+            }
         }
 
+        var scriptedMarkers = previewIsAlpha ? AlphaPreviewMarkers : BetaPreviewMarkers;
         DrawMechanicStatus(
-            previewInitialMarker != previewBuddyMarker,
-            previewCurrentMarker,
+            previewIsAlpha,
+            scriptedMarkers[previewCompletedRounds],
             previewCompletedRounds,
             previewResolve,
             previewActivePhase);
@@ -250,70 +329,9 @@ public class MainWindow : Window, IDisposable
         }
     }
 
-    /// <summary>Lets preview users choose a marker image without changing live state.</summary>
-    private void DrawPreviewMarkerSelector(string label, string id, ref uint markerId)
-    {
-        if (!ImGui.BeginCombo(id, $"{label}: {P2ForsakenTracker.MarkerName(markerId)}"))
-        {
-            return;
-        }
-
-        foreach (var option in PreviewMarkers)
-        {
-            if (ImGui.Selectable($"{P2ForsakenTracker.MarkerName(option)}##{id}{option}", markerId == option))
-            {
-                markerId = option;
-            }
-        }
-
-        ImGui.EndCombo();
-    }
-
-    /// <summary>Draws and persists the selected party buddy.</summary>
-    private void DrawBuddySelector()
-    {
-        var buddyContentId = plugin.Configuration.SelectedBuddyContentId;
-        var buddyName = Plugin.PartyList
-            .FirstOrDefault(member => member.ContentId == buddyContentId)?.Name.TextValue ?? "Select buddy";
-
-        if (!ImGui.BeginCombo("Buddy", buddyName))
-        {
-            return;
-        }
-
-        foreach (var member in Plugin.PartyList)
-        {
-            if (Plugin.ObjectTable.LocalPlayer is { } localPlayer && member.EntityId == localPlayer.EntityId)
-            {
-                continue;
-            }
-
-            var isSelected = member.ContentId == buddyContentId;
-            if (ImGui.Selectable($"{member.Name.TextValue}##{member.ContentId}", isSelected))
-            {
-                plugin.Configuration.SelectedBuddyContentId = member.ContentId;
-                plugin.Configuration.Save();
-            }
-
-            if (isSelected)
-            {
-                ImGui.SetItemDefaultFocus();
-            }
-        }
-
-        ImGui.EndCombo();
-    }
-
-    /// <summary>Advances one tower and updates the local simulated marker when this group takes it.</summary>
+    /// <summary>Advances one simulated tower hit.</summary>
     private void AdvancePreview()
     {
-        var isAlpha = previewInitialMarker != previewBuddyMarker;
-        if ((TowerSequence[previewCompletedRounds] == 'A') == isAlpha)
-        {
-            previewCurrentMarker = NextPreviewMarker(previewCurrentMarker);
-        }
-
-        var previousRounds = previewCompletedRounds;
         previewCompletedRounds++;
         previewActivePhase = previewCompletedRounds % 2 == 0 ? 2 : 1;
         if (previewCompletedRounds % 2 == 1)
@@ -323,7 +341,7 @@ public class MainWindow : Window, IDisposable
     }
 
     /// <summary>Draws an image centered in the window.</summary>
-    private void DrawIcon(string imageName, float height)
+    private void DrawIcon(string imageName, float height, Vector4 tint)
     {
         var texture = Plugin.TextureProvider.GetFromFile(System.IO.Path.Combine(markerImageDirectory, imageName));
         var image = texture.GetWrapOrDefault();
@@ -333,7 +351,7 @@ public class MainWindow : Window, IDisposable
             return;
         }
 
-        ImGui.Image(image.Handle, new Vector2(IconWidth(imageName, height), height));
+        ImGui.Image(image.Handle, new Vector2(IconWidth(imageName, height), height), Vector2.Zero, Vector2.One, tint);
     }
 
     /// <summary>Returns an icon's scaled width while preserving its source aspect ratio.</summary>
@@ -345,30 +363,31 @@ public class MainWindow : Window, IDisposable
     }
 
     /// <summary>Gets the image asset for one observed Forsaken marker.</summary>
-    private static string? MarkerImageName(uint markerId)
+    private static string? MarkerImageName(uint markerId, bool takesTower)
     {
         return markerId switch
         {
             715 => "stack.png",
-            716 => "spread.png",
-            717 => "cone.png",
+            716 => takesTower ? "spread.png" : "spread_gray.png",
+            717 => takesTower ? "cone.png" : "cone_gray.png",
             _ => null,
         };
     }
 
-    /// <summary>Returns the next marker type used after a simulated tower hit.</summary>
-    private static uint NextPreviewMarker(uint markerId)
+    /// <summary>Returns whether this group stands in the tower that is about to hit.</summary>
+    private static bool TakesTower(bool isAlpha, int completedRounds)
     {
-        var index = Array.IndexOf(PreviewMarkers, markerId);
-        return PreviewMarkers[(index + 1) % PreviewMarkers.Length];
+        return completedRounds < TowerSequence.Length
+            && (TowerSequence[completedRounds] == 'A') == isAlpha;
     }
 
     /// <summary>Resets all simulated preview state.</summary>
     private void ResetPreview()
     {
-        previewCurrentMarker = previewInitialMarker;
         previewCompletedRounds = 0;
         previewResolve = null;
         previewActivePhase = 0;
+        ResetLimitCutPreview();
+        ResetKefkaSaysPreview();
     }
 }
